@@ -1,5 +1,5 @@
-use std::env;
 use aurpc::{Error, RpcSocket};
+use std::env;
 
 #[async_std::main]
 async fn main() -> Result<(), Error> {
