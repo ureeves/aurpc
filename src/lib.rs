@@ -2,9 +2,13 @@
 #![deny(missing_docs)]
 #![deny(clippy::all)]
 
+mod awaiting;
+mod error;
+mod message;
+mod result;
+
 pub use async_std;
 use async_std::{
-    io,
     net::{SocketAddr, ToSocketAddrs, UdpSocket},
     sync::{Arc, Mutex},
     task::{self, JoinHandle},
@@ -14,136 +18,11 @@ use futures::{
     sink::SinkExt,
     stream::StreamExt,
 };
-use std::{cmp, collections::HashMap};
 
-type Result<T> = io::Result<T>;
-
-const MAX_UDP_LEN: usize = 65507;
-
-/// Message sent on the wire.
-struct RpcMessage {
-    flags: u8,
-    rid: u16,
-
-    len: usize,
-    buf: [u8; MAX_UDP_LEN],
-}
-
-impl RpcMessage {
-    /// Wraps the given buffer with flags and request id.
-    ///
-    /// Can fail if the buffer is longer than 65504 bytes or smaller than 3
-    /// bytes.
-    fn wrap(flags: u8, rid: u16, rbuf: &[u8]) -> Result<Self> {
-        if rbuf.len() < 3 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "buffer too small",
-            ));
-        }
-
-        if rbuf.len() > 65504 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "buffer too large",
-            ));
-        }
-
-        let len = rbuf.len() + 3;
-        let buf = {
-            let mut buf = [0u8; MAX_UDP_LEN];
-            let rid_bytes = rid.to_be_bytes();
-
-            buf[0] = flags;
-            buf[1] = rid_bytes[0];
-            buf[2] = rid_bytes[1];
-            buf[3..3 + rbuf.len()].copy_from_slice(rbuf);
-
-            buf
-        };
-
-        Ok(Self {
-            flags,
-            rid,
-            len,
-            buf,
-        })
-    }
-
-    /// Reads a message from the given buffer.
-    ///
-    /// Can fail if the buffer is longer than 65507 bytes or smaller than 3
-    /// bytes.
-    fn read(rbuf: &[u8]) -> Result<Self> {
-        if rbuf.len() < 3 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "buffer too small",
-            ));
-        }
-
-        if rbuf.len() > 65507 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "buffer too large",
-            ));
-        }
-
-        let flags = rbuf[0];
-        let rid = {
-            let mut bytes = [0u8; 2];
-
-            bytes[0] = rbuf[1];
-            bytes[1] = rbuf[2];
-
-            u16::from_be_bytes(bytes)
-        };
-        let len = rbuf.len();
-        let buf = {
-            let mut buf = [0u8; MAX_UDP_LEN];
-            buf[..rbuf.len()].copy_from_slice(rbuf);
-            buf
-        };
-
-        Ok(Self {
-            flags,
-            rid,
-            len,
-            buf,
-        })
-    }
-
-    /// Get the value of the request bit. 0 if request, 1 if response.
-    fn rbit(&self) -> u8 {
-        self.flags & 1
-    }
-
-    /// Flips the value of the request bit. Returns the value after the flip.
-    fn flip_rbit(&mut self) -> u8 {
-        let flags = self.flags | 1;
-
-        self.flags = flags;
-        self.buf[0] = flags;
-
-        self.rbit()
-    }
-
-    /// Writes data to a buffer.
-    ///
-    /// As much data will be written as the buffer can handle. If the buffer is
-    /// too small to hold it all, the data will be truncated.
-    fn write_data(&self, buf: &mut [u8]) -> usize {
-        let written = cmp::min(buf.len(), self.len - 3);
-        buf[..written].copy_from_slice(&self.buf[3..written + 3]);
-        written
-    }
-}
-
-impl AsRef<[u8]> for RpcMessage {
-    fn as_ref(&self) -> &[u8] {
-        &self.buf[..self.len]
-    }
-}
+use awaiting::AwaitingMap;
+pub use error::Error;
+use message::{RpcHeader, RpcMessage, UdpBuffer};
+use result::Result;
 
 /// A RPC socket.
 ///
@@ -170,11 +49,13 @@ async fn rpc_loop(
     let receiver_handle = task::spawn(receiver_loop(udp, msg_sender));
 
     while let Some((msg, addr)) = msg_receiver.next().await {
-        if msg.rbit() == 0 {
+        if msg.is_request() {
             if sender.send((msg, addr)).await.is_err() {
                 break;
             }
-        } else if let Some(rsp_sender) = awaiting_map.pop(addr, msg.rid).await {
+        } else if let Some(rsp_sender) =
+            awaiting_map.pop(addr, msg.request_id()).await
+        {
             let _ = rsp_sender.send(msg);
         }
     }
@@ -187,11 +68,11 @@ async fn receiver_loop(
     udp: Arc<UdpSocket>,
     mut msg_sender: mpsc::UnboundedSender<(RpcMessage, SocketAddr)>,
 ) {
-    let mut buf = [0u8; MAX_UDP_LEN];
+    let mut buf = UdpBuffer::raw_udp_buffer();
 
     // TODO Handle the possibility of errors better
     while let Ok((bytes_read, addr)) = udp.recv_from(&mut buf[..]).await {
-        if let Ok(msg) = RpcMessage::read(&buf[..bytes_read]) {
+        if let Ok(msg) = RpcMessage::from_buffer(&buf[..bytes_read]) {
             if msg_sender.send((msg, addr)).await.is_err() {
                 break;
             }
@@ -230,7 +111,7 @@ impl RpcSocket {
     /// This can be useful, for example, when binding to port 0 to figure out
     /// which port was actually bound.
     pub fn local_addr(&self) -> Result<SocketAddr> {
-        self.udp.local_addr()
+        Ok(self.udp.local_addr()?)
     }
 
     /// Sends an RPC on the socket to the given address.
@@ -246,10 +127,11 @@ impl RpcSocket {
         let addr = get_addr(addrs).await?;
 
         let (sender, receiver) = oneshot::channel();
-        let flags = 0;
-        let rid = self.awaiting_map.put(addr, sender).await;
 
-        let msg = match RpcMessage::wrap(flags, rid, buf) {
+        let rid = self.awaiting_map.put(addr, sender).await;
+        let header = RpcHeader::request_from_rid(rid);
+
+        let msg = match RpcMessage::from_data(header, buf) {
             Ok(msg) => msg,
             Err(err) => {
                 self.awaiting_map.pop(addr, rid).await;
@@ -257,24 +139,21 @@ impl RpcSocket {
             }
         };
 
-        let written = match self.udp.send_to(msg.as_ref(), addr).await {
+        let written = match self.udp.send_to(msg.buffer_slice(), addr).await {
             Ok(written) => written,
             Err(err) => {
                 self.awaiting_map.pop(addr, rid).await;
-                return Err(err);
+                return Err(err.into());
             }
         };
 
         let rsp = match receiver.await {
             Ok(rsp) => rsp,
-            Err(_) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "return channel canceled",
-                ))
-            }
+            Err(_) => return Err(Error::other("return channel canceled")),
         };
         let read = rsp.write_data(rsp_buf);
+        // TODO Strange here. Maybe use inversion of control by allowing
+        // messages to call send_to themselves.
         Ok((written - 3, read))
     }
 
@@ -285,20 +164,17 @@ impl RpcSocket {
         match self.receiver.lock().await.next().await {
             Some((msg, addr)) => {
                 let read = msg.write_data(buf);
+                let (header, _) = msg.split();
                 Ok((
                     read,
                     RpcResponder {
                         origin: addr,
                         udp: self.udp.clone(),
-                        flags: msg.flags,
-                        rid: msg.rid,
+                        header,
                     },
                 ))
             }
-            None => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "unexpected channel close",
-            )),
+            None => Err(Error::other("unexpected channel close")),
         }
     }
 
@@ -308,7 +184,7 @@ impl RpcSocket {
     ///
     /// [`set_ttl`]: #method.set_ttl
     pub fn ttl(&self) -> Result<u32> {
-        self.udp.ttl()
+        Ok(self.udp.ttl()?)
     }
 
     /// Sets the value for the `IP_TTL` option on this socket.
@@ -316,46 +192,7 @@ impl RpcSocket {
     /// This value sets the time-to-live field that is used in every packet sent
     /// from this socket.
     pub fn set_ttl(&self, ttl: u32) -> Result<()> {
-        self.udp.set_ttl(ttl)
-    }
-}
-
-#[derive(Default)]
-struct AwaitingMap {
-    map: Mutex<MapState>,
-}
-
-#[derive(Default)]
-struct MapState {
-    current_rid: u16,
-    map: HashMap<(SocketAddr, u16), oneshot::Sender<RpcMessage>>,
-}
-
-impl AwaitingMap {
-    async fn put(
-        &self,
-        addr: SocketAddr,
-        sender: oneshot::Sender<RpcMessage>,
-    ) -> u16 {
-        let mut map_state = self.map.lock().await;
-
-        let mut rid = map_state.current_rid;
-        while map_state.map.contains_key(&(addr, rid)) {
-            rid += rid.wrapping_add(1);
-        }
-        map_state.current_rid = rid;
-
-        map_state.map.insert((addr, rid), sender);
-        rid
-    }
-
-    async fn pop(
-        &self,
-        addr: SocketAddr,
-        rid: u16,
-    ) -> Option<oneshot::Sender<RpcMessage>> {
-        let mut map_state = self.map.lock().await;
-        map_state.map.remove(&(addr, rid))
+        Ok(self.udp.set_ttl(ttl)?)
     }
 }
 
@@ -366,8 +203,7 @@ pub struct RpcResponder {
     origin: SocketAddr,
     udp: Arc<UdpSocket>,
 
-    flags: u8,
-    rid: u16,
+    header: RpcHeader,
 }
 
 impl RpcResponder {
@@ -379,11 +215,13 @@ impl RpcResponder {
     /// Responds to the received RPC and consumes the responder.
     ///
     /// On success, returns the number of bytes written.
-    pub async fn respond(self, buf: &[u8]) -> Result<usize> {
-        let mut msg = RpcMessage::wrap(self.flags, self.rid, buf)?;
-        msg.flip_rbit();
+    pub async fn respond(mut self, buf: &[u8]) -> Result<usize> {
+        self.header.flip_request();
+        let msg = RpcMessage::from_data(self.header, buf)?;
 
-        let written = self.udp.send_to(msg.as_ref(), self.origin).await?;
+        let written = self.udp.send_to(msg.buffer_slice(), self.origin).await?;
+        // TODO Strange here. Maybe invert the control by allowing the message
+        // to write itself in a send to call.
         Ok(written - 3)
     }
 }
@@ -391,9 +229,6 @@ impl RpcResponder {
 async fn get_addr<A: ToSocketAddrs>(addrs: A) -> Result<SocketAddr> {
     match addrs.to_socket_addrs().await?.next() {
         Some(addr) => Ok(addr),
-        None => Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "no addresses to send data to",
-        )),
+        None => Err(Error::invalid_input("no addresses to send data to")),
     }
 }

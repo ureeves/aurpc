@@ -1,8 +1,7 @@
-use async_std::io;
-use udp_rpc::RpcSocket;
+use udp_rpc::{Error, RpcSocket};
 
 #[async_std::main]
-async fn main() -> io::Result<()> {
+async fn main() -> Result<(), Error> {
     let socket = RpcSocket::bind("0.0.0.0:0").await?;
 
     let addr = socket.local_addr();
