@@ -14,7 +14,7 @@ async fn main() -> io::Result<()> {
     }
 
     let buf = b"hello, world";
-    let mut rsp_buf = buf.clone();
+    let mut rsp_buf = *buf;
     let socket = RpcSocket::bind("0.0.0.0:0").await?;
 
     let (_, read) = socket
