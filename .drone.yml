@@ -1,0 +1,78 @@
+---
+kind: pipeline
+type: docker
+name: pre-build
+
+steps:
+- name: format
+  image: rust:1.44
+  commands:
+  - rustup component add rustfmt
+  - cargo fmt -- --check
+
+- name: lint
+  image: rust:1.44
+  commands:
+  - rustup component add clippy
+  - cargo clippy -- -D warnings
+
+---
+kind: pipeline
+type: docker
+name: rust-1-44-default-features
+
+steps:
+- name: build
+  image: rust:1.44
+  commands:
+  - cargo build --verbose --all
+
+- name: test
+  image: rust:1.44
+  commands:
+  - cargo test --verbose --all
+
+depends_on:
+- pre-build
+
+---
+kind: pipeline
+type: docker
+name: rust-1-44-all-features
+
+steps:
+- name: build
+  image: rust:1.44
+  commands:
+  - cargo build --all-features --verbose --all
+
+- name: test
+  image: rust:1.44
+  commands:
+  - cargo test --all-features --verbose --all
+
+depends_on:
+- pre-build
+
+---
+kind: pipeline
+type: docker
+name: publish-crate
+
+steps:
+- name: publish
+  image: rust:1.44
+  environment:
+    CARGO_REGISTRY_TOKEN:
+      from_secret: CARGO_TOKEN
+
+  commands:
+  - cargo publish --no-verify --verbose
+
+depends_on:
+- rust-1-44-default-features
+- rust-1-44-all-features
+
+trigger:
+  event:
+    - tag

@@ -1,0 +1,21 @@
+[package]
+name = "udp-rpc"
+version = "0.1.0"
+authors = ["Eduardo Leegwater Simões <eduardols@protonmail.com>"]
+edition = "2018"
+
+[dependencies]
+async-std = { version = "1.6.1", features = ["attributes"] }
+futures = "0.3.5"
+
+[lib]
+name = "udp_rpc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "echo-server"
+path = "src/echo-server.rs"
+
+[[bin]]
+name = "echo-client"
+path = "src/echo-client.rs"
