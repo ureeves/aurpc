@@ -1,5 +1,5 @@
 [package]
-name = "udp-rpc"
+name = "aurpc"
 version = "0.1.0"
 authors = ["Eduardo Leegwater Simões <eduardols@protonmail.com>"]
 edition = "2018"
@@ -9,7 +9,7 @@ async-std = { version = "1.6.1", features = ["attributes"] }
 futures = "0.3.5"
 
 [lib]
-name = "udp_rpc"
+name = "aurpc"
 path = "src/lib.rs"
 
 [[bin]]

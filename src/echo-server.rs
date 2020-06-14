@@ -1,4 +1,4 @@
-use udp_rpc::{Error, RpcSocket};
+use aurpc::{Error, RpcSocket};
 
 #[async_std::main]
 async fn main() -> Result<(), Error> {
