@@ -6,7 +6,7 @@ use udp_rpc::RpcSocket;
 async fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 1 {
+    if args.len() < 2 {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "needs a socket address as input",
