@@ -1,5 +1,5 @@
-use udp_rpc::RpcSocket;
 use async_std::io;
+use udp_rpc::RpcSocket;
 
 #[async_std::main]
 async fn main() -> io::Result<()> {
