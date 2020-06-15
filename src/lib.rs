@@ -7,6 +7,9 @@ mod error;
 mod message;
 mod result;
 
+#[cfg(test)]
+mod tests;
+
 pub use async_std;
 use async_std::{
     net::{SocketAddr, ToSocketAddrs, UdpSocket},
@@ -19,9 +22,9 @@ use futures::{
     stream::StreamExt,
 };
 
-use awaiting::AwaitingMap;
+use awaiting::AwaitingRequestMap;
 pub use error::Error;
-use message::{RpcHeader, RpcMessage, UdpBuffer};
+use message::{RpcHeader, RpcMessage};
 use result::Result;
 
 /// A RPC socket.
@@ -34,7 +37,7 @@ use result::Result;
 /// [`received from`]: #method.recv_from
 pub struct RpcSocket {
     udp: Arc<UdpSocket>,
-    awaiting_map: Arc<AwaitingMap>,
+    awaiting_map: Arc<AwaitingRequestMap>,
 
     _handle: JoinHandle<()>,
     receiver: Mutex<mpsc::UnboundedReceiver<(RpcMessage, SocketAddr)>>,
@@ -42,7 +45,7 @@ pub struct RpcSocket {
 
 async fn rpc_loop(
     udp: Arc<UdpSocket>,
-    awaiting_map: Arc<AwaitingMap>,
+    awaiting_map: Arc<AwaitingRequestMap>,
     mut sender: mpsc::UnboundedSender<(RpcMessage, SocketAddr)>,
 ) {
     let (msg_sender, mut msg_receiver) = mpsc::unbounded();
@@ -68,14 +71,10 @@ async fn receiver_loop(
     udp: Arc<UdpSocket>,
     mut msg_sender: mpsc::UnboundedSender<(RpcMessage, SocketAddr)>,
 ) {
-    let mut buf = UdpBuffer::raw_udp_buffer();
-
     // TODO Handle the possibility of errors better
-    while let Ok((bytes_read, addr)) = udp.recv_from(&mut buf[..]).await {
-        if let Ok(msg) = RpcMessage::from_buffer(&buf[..bytes_read]) {
-            if msg_sender.send((msg, addr)).await.is_err() {
-                break;
-            }
+    while let Ok((msg, addr)) = RpcMessage::read_from_socket(&udp).await {
+        if msg_sender.send((msg, addr)).await.is_err() {
+            break;
         }
     }
 }
@@ -90,7 +89,7 @@ impl RpcSocket {
     /// [`local_addr`]: #method.local_addr
     pub async fn bind<A: ToSocketAddrs>(addrs: A) -> Result<Self> {
         let udp = Arc::new(UdpSocket::bind(addrs).await?);
-        let awaiting_map = Arc::new(AwaitingMap::default());
+        let awaiting_map = Arc::new(AwaitingRequestMap::default());
 
         let (sender, receiver) = mpsc::unbounded();
         let receiver = Mutex::new(receiver);
@@ -131,30 +130,24 @@ impl RpcSocket {
         let rid = self.awaiting_map.put(addr, sender).await;
         let header = RpcHeader::request_from_rid(rid);
 
-        let msg = match RpcMessage::from_data(header, buf) {
-            Ok(msg) => msg,
-            Err(err) => {
-                self.awaiting_map.pop(addr, rid).await;
-                return Err(err);
-            }
-        };
-
-        let written = match self.udp.send_to(msg.buffer_slice(), addr).await {
-            Ok(written) => written,
-            Err(err) => {
-                self.awaiting_map.pop(addr, rid).await;
-                return Err(err.into());
-            }
-        };
+        let written =
+            match RpcMessage::write_to_socket(&self.udp, addr, header, buf)
+                .await
+            {
+                Ok(written) => written,
+                Err(err) => {
+                    self.awaiting_map.pop(addr, rid).await;
+                    return Err(err);
+                }
+            };
 
         let rsp = match receiver.await {
             Ok(rsp) => rsp,
             Err(_) => return Err(Error::other("return channel canceled")),
         };
-        let read = rsp.write_data(rsp_buf);
-        // TODO Strange here. Maybe use inversion of control by allowing
-        // messages to call send_to themselves.
-        Ok((written - 3, read))
+        let read = rsp.write_to_buffer(rsp_buf);
+
+        Ok((written, read))
     }
 
     /// Receives RPC from the socket.
@@ -163,8 +156,8 @@ impl RpcSocket {
     pub async fn recv(&self, buf: &mut [u8]) -> Result<(usize, RpcResponder)> {
         match self.receiver.lock().await.next().await {
             Some((msg, addr)) => {
-                let read = msg.write_data(buf);
-                let (header, _) = msg.split();
+                let read = msg.write_to_buffer(buf);
+                let header = msg.split();
                 Ok((
                     read,
                     RpcResponder {
@@ -217,12 +210,14 @@ impl RpcResponder {
     /// On success, returns the number of bytes written.
     pub async fn respond(mut self, buf: &[u8]) -> Result<usize> {
         self.header.flip_request();
-        let msg = RpcMessage::from_data(self.header, buf)?;
-
-        let written = self.udp.send_to(msg.buffer_slice(), self.origin).await?;
-        // TODO Strange here. Maybe invert the control by allowing the message
-        // to write itself in a send to call.
-        Ok(written - 3)
+        let written = RpcMessage::write_to_socket(
+            &self.udp,
+            self.origin,
+            self.header,
+            buf,
+        )
+        .await?;
+        Ok(written)
     }
 }
 
