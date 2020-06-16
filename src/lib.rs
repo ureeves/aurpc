@@ -1,16 +1,49 @@
-//! Asynchronous remote procedure call protocol using UDP.
+//! Asynchronous UDP RPCs.
+//!
+//! Exposes an [`RpcSocket`] allowing for sending requests and awaiting a
+//! response as well as listening to requests, with UDP as transport.
+//!
+//! This is achieved by implementing an 24-bit protocol header on top of UDP
+//! containing 8-bit flags and a 16-bit request id.
+//!
+//! ```text
+//!                     1                   2
+//! 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4
+//! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//! |     Flags     |           Request Id          |
+//! +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+//! ```
+//!
+//! Since a UDP datagram can carry a maximum of 65507 data bytes. This means
+//! that, with the added overhead, each message can be a maximum of `65504
+//! bytes`.
+//!
+//! # Examples
+//!
+//! ```no_run
+//! # fn main() -> std::io::Result<()> { async_std::task::block_on(async {
+//! use aurpc::RpcSocket;
+//!
+//! let socket = RpcSocket::bind("127.0.0.1:8080").await?;
+//! let mut buf = vec![0u8; 1024];
+//!
+//! loop {
+//!     let (n, responder) = socket.recv_from(&mut buf).await?;
+//!     responder.respond(&buf[..n]).await?;
+//! }
+//! # }) }
+//! ```
 #![deny(missing_docs)]
 #![deny(clippy::all)]
 
 mod awaiting;
-mod error;
+mod errors;
 mod message;
 mod result;
 
 #[cfg(test)]
 mod tests;
 
-pub use async_std;
 use async_std::{
     net::{SocketAddr, ToSocketAddrs, UdpSocket},
     sync::{Arc, Mutex},
@@ -23,7 +56,6 @@ use futures::{
 };
 
 use awaiting::AwaitingRequestMap;
-pub use error::Error;
 use message::{RpcHeader, RpcMessage};
 use result::Result;
 
@@ -117,7 +149,7 @@ impl RpcSocket {
     ///
     /// On success, returns the number of bytes written to and read from the
     /// socket.
-    pub async fn send<A: ToSocketAddrs>(
+    pub async fn send_to<A: ToSocketAddrs>(
         &self,
         buf: &[u8],
         rsp_buf: &mut [u8],
@@ -143,7 +175,7 @@ impl RpcSocket {
 
         let rsp = match receiver.await {
             Ok(rsp) => rsp,
-            Err(_) => return Err(Error::other("return channel canceled")),
+            Err(_) => return Err(errors::other("return channel canceled")),
         };
         let read = rsp.write_to_buffer(rsp_buf);
 
@@ -153,7 +185,10 @@ impl RpcSocket {
     /// Receives RPC from the socket.
     ///
     /// On success, returns the number of bytes read and the origin.
-    pub async fn recv(&self, buf: &mut [u8]) -> Result<(usize, RpcResponder)> {
+    pub async fn recv_from(
+        &self,
+        buf: &mut [u8],
+    ) -> Result<(usize, RpcResponder)> {
         match self.receiver.lock().await.next().await {
             Some((msg, addr)) => {
                 let read = msg.write_to_buffer(buf);
@@ -167,7 +202,7 @@ impl RpcSocket {
                     },
                 ))
             }
-            None => Err(Error::other("unexpected channel close")),
+            None => Err(errors::other("unexpected channel close")),
         }
     }
 
@@ -224,6 +259,6 @@ impl RpcResponder {
 async fn get_addr<A: ToSocketAddrs>(addrs: A) -> Result<SocketAddr> {
     match addrs.to_socket_addrs().await?.next() {
         Some(addr) => Ok(addr),
-        None => Err(Error::invalid_input("no addresses to send data to")),
+        None => Err(errors::invalid_input("no addresses to send data to")),
     }
 }

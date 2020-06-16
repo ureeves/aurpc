@@ -19,7 +19,7 @@ async fn echo_succeeds() {
     let server_handle = task::spawn(async move {
         let mut buf = [0u8; 256];
         let (bytes_read, responder) = server_socket
-            .recv(&mut buf[..])
+            .recv_from(&mut buf[..])
             .await
             .expect("couldn't read on server socket");
         responder

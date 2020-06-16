@@ -5,7 +5,7 @@ use async_std::{
     sync::Arc,
 };
 
-use crate::{error::Error, result::Result};
+use crate::{errors, result::Result};
 
 const MAX_UDP_LEN: usize = 65507;
 
@@ -86,7 +86,9 @@ impl RpcMessage {
         data: &[u8],
     ) -> Result<usize> {
         if data.len() > 65504 {
-            return Err(Error::invalid_input("buffer longer than 65504 bytes"));
+            return Err(errors::invalid_input(
+                "buffer longer than 65504 bytes",
+            ));
         }
 
         let len = data.len() + 3;

@@ -1,7 +1,16 @@
 [package]
-name = "aurpc"
 version = "0.1.0"
+name = "aurpc"
+description = "Asynchronous UDP RPCs"
+readme = "Readme.md"
+
 authors = ["Eduardo Leegwater Simões <eduardols@protonmail.com>"]
+documentation = "https://docs.rs/aurpc"
+repository = "https://git.ureeves.com/ureeves/aurpc"
+
+keywords = ["RPC", "UDP", "network"]
+categories = ["network-programming"]
+
 edition = "2018"
 
 [dependencies]
