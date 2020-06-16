@@ -1,6 +1,6 @@
 //! Asynchronous UDP RPCs.
 //!
-//! Exposes an [`RpcSocket`] allowing for sending requests and awaiting a
+//! Exposes a socket-like interface allowing for sending requests and awaiting a
 //! response as well as listening to requests, with UDP as transport.
 //!
 //! This is achieved by implementing an 24-bit protocol header on top of UDP
