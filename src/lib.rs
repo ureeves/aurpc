@@ -51,8 +51,15 @@ use async_std::{
 };
 use futures::{
     channel::{mpsc, oneshot},
+    future::FutureExt,
     sink::SinkExt,
     stream::StreamExt,
+};
+use std::{
+    future::Future,
+    ops::Drop,
+    pin::Pin,
+    task::{Context, Poll},
 };
 
 use awaiting::AwaitingRequestMap;
@@ -149,12 +156,13 @@ impl RpcSocket {
     ///
     /// On success, returns the number of bytes written to and read from the
     /// socket.
-    pub async fn send_to<A: ToSocketAddrs>(
+    #[allow(clippy::needless_lifetimes)]
+    pub async fn send_to<'a, A: ToSocketAddrs>(
         &self,
         buf: &[u8],
-        rsp_buf: &mut [u8],
+        rsp_buf: &'a mut [u8],
         addrs: A,
-    ) -> Result<(usize, usize)> {
+    ) -> Result<(usize, ResponseFuture<'a>)> {
         let addr = get_addr(addrs).await?;
 
         let (sender, receiver) = oneshot::channel();
@@ -173,13 +181,16 @@ impl RpcSocket {
                 }
             };
 
-        let rsp = match receiver.await {
-            Ok(rsp) => rsp,
-            Err(_) => return Err(errors::other("return channel canceled")),
-        };
-        let read = rsp.write_to_buffer(rsp_buf);
-
-        Ok((written, read))
+        Ok((
+            written,
+            ResponseFuture {
+                rsp_buf,
+                addr,
+                rid,
+                awaiting_map: self.awaiting_map.clone(),
+                receiver,
+            },
+        ))
     }
 
     /// Receives RPC from the socket.
@@ -221,6 +232,49 @@ impl RpcSocket {
     /// from this socket.
     pub fn set_ttl(&self, ttl: u32) -> Result<()> {
         Ok(self.udp.set_ttl(ttl)?)
+    }
+}
+
+/// Future returned by [`send_to`].
+///
+/// Allows for awaiting in two steps - for sending the request first, and then
+/// for receiving the response.
+///
+/// Dropping signals disinterest in the response.
+///
+/// [`send_to`]: struct.RpcSocket.html#method.send_to
+pub struct ResponseFuture<'a> {
+    rsp_buf: &'a mut [u8],
+    addr: SocketAddr,
+    rid: u16,
+    awaiting_map: Arc<AwaitingRequestMap>,
+    receiver: oneshot::Receiver<RpcMessage>,
+}
+
+impl<'a> Future for ResponseFuture<'a> {
+    type Output = Result<usize>;
+
+    fn poll(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Self::Output> {
+        let this = &mut *self;
+        this.receiver.poll_unpin(cx).map(|res| match res {
+            Ok(rsp) => {
+                let read = rsp.write_to_buffer(this.rsp_buf);
+                Ok(read)
+            }
+            Err(_) => Err(errors::other("unexpected channel cancel")),
+        })
+    }
+}
+
+/// Explicitly remove from map when dropped.
+///
+/// This allows for timeouts to be implemented outside this crate, for instance.
+impl<'a> Drop for ResponseFuture<'a> {
+    fn drop(&mut self) {
+        task::block_on(self.awaiting_map.pop(self.addr, self.rid));
     }
 }
 
