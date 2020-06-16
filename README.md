@@ -36,3 +36,8 @@ loop {
     responder.respond(&buf[..n]).await?;
 }
 ```
+
+# License
+
+This crate is licensed under the MIT license. See the [license](License.txt) for
+more details.
