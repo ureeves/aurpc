@@ -1,5 +1,5 @@
-[![Build
-Status](https://drone.ureeves.com/api/badges/ureeves/aurpc/status.svg)](https://drone.ureeves.com/ureeves/aurpc)
+[![Build Status](https://drone.ureeves.com/api/badges/ureeves/aurpc/status.svg)](https://drone.ureeves.com/ureeves/aurpc)
+[![Docs](https://docs.rs/aurpc/badge.svg)](https://docs.rs/aurpc)
 
 # {{crate}}
 
