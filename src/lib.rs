@@ -45,7 +45,7 @@ mod result;
 mod tests;
 
 use async_std::{
-    net::{SocketAddr, ToSocketAddrs, UdpSocket},
+    net::UdpSocket,
     sync::{Arc, Mutex},
     task::{self, JoinHandle},
 };
@@ -57,6 +57,7 @@ use futures::{
 };
 use std::{
     future::Future,
+    net::{SocketAddr, ToSocketAddrs},
     ops::Drop,
     pin::Pin,
     task::{Context, Poll},
@@ -127,7 +128,8 @@ impl RpcSocket {
     ///
     /// [`local_addr`]: #method.local_addr
     pub async fn bind<A: ToSocketAddrs>(addrs: A) -> Result<Self> {
-        let udp = Arc::new(UdpSocket::bind(addrs).await?);
+        let addr = get_addr(addrs)?;
+        let udp = Arc::new(UdpSocket::bind(addr).await?);
         let awaiting_map = Arc::new(AwaitingRequestMap::default());
 
         let (sender, receiver) = mpsc::unbounded();
@@ -163,7 +165,7 @@ impl RpcSocket {
         rsp_buf: &'a mut [u8],
         addrs: A,
     ) -> Result<(usize, ResponseFuture<'a>)> {
-        let addr = get_addr(addrs).await?;
+        let addr = get_addr(addrs)?;
 
         let (sender, receiver) = oneshot::channel();
 
@@ -310,8 +312,8 @@ impl RpcResponder {
     }
 }
 
-async fn get_addr<A: ToSocketAddrs>(addrs: A) -> Result<SocketAddr> {
-    match addrs.to_socket_addrs().await?.next() {
+fn get_addr<A: ToSocketAddrs>(addrs: A) -> Result<SocketAddr> {
+    match addrs.to_socket_addrs()?.next() {
         Some(addr) => Ok(addr),
         None => Err(errors::invalid_input("no addresses to send data to")),
     }
