@@ -1,5 +1,5 @@
 [package]
-version = "0.3.0"
+version = "0.3.1"
 name = "aurpc"
 description = "Asynchronous UDP RPCs"
 readme = "README.md"

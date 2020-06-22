@@ -253,6 +253,16 @@ pub struct ResponseFuture<'a> {
     receiver: oneshot::Receiver<RpcMessage>,
 }
 
+impl<'a> ResponseFuture<'a> {
+    /// Address one is expecting to receive a response from.
+    ///
+    /// Useful for situations where one doesn't know what `ToSocketAddrs`
+    /// resolves into.
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.addr
+    }
+}
+
 impl<'a> Future for ResponseFuture<'a> {
     type Output = Result<usize>;
 
